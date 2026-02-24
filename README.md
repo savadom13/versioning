@@ -14,7 +14,7 @@
 python -m venv venv
 source venv/bin/activate  # Windows: venv\Scripts\activate
 pip install -r requirements.txt
-python app.py
+python app/app.py
 ```
 
 Open: http://127.0.0.1:5000
@@ -23,4 +23,4 @@ Open: http://127.0.0.1:5000
 
 Set environment variable:
 
-DATABASE_URL=mysql://user:password@localhost/dbname
+DATABASE_URL=mysql+pymysql://user:password@localhost/dbname

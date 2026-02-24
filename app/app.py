@@ -1,8 +1,17 @@
 
+from datetime import datetime
+import os
+from pathlib import Path
+import sys
+
 from flask import Flask, render_template, request, redirect, url_for
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 from config import Config
 from models import db, Object, ObjectVersion
-from datetime import datetime
 
 app = Flask(__name__)
 app.config.from_object(Config)
@@ -53,4 +62,6 @@ def versions(object_id):
     return render_template("versions.html", versions=versions, object_id=object_id)
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    host = os.environ.get("FLASK_HOST", "127.0.0.1")
+    port = int(os.environ.get("FLASK_PORT", "8000"))
+    app.run(host=host, port=port, debug=True)
