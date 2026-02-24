@@ -17,7 +17,7 @@ asset_signals = db.Table(
 
 class VersionedMixin:
     __versioned__ = True
-    __version_exclude__ = {"created_at", "updated_at", "lock_version"}
+    __version_exclude__ = {"created_at", "updated_at", "created_by", "updated_by", "lock_version"}
 
     id = db.Column(db.Integer, primary_key=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
@@ -152,6 +152,18 @@ def _compute_diff(entity):
     return diff
 
 
+def _get_last_snapshot(session, entity_type, entity_id):
+    previous_version = (
+        session.query(EntityVersion)
+        .filter_by(entity_type=entity_type, entity_id=entity_id)
+        .order_by(EntityVersion.version.desc())
+        .first()
+    )
+    if previous_version:
+        return previous_version.snapshot or {}
+    return None
+
+
 def _is_versioned_entity(entity):
     return (
         hasattr(entity, "__table__")
@@ -163,14 +175,43 @@ def _is_versioned_entity(entity):
 @event.listens_for(db.session.__class__, "before_flush")
 def collect_version_events(session, flush_context, instances):
     events = session.info.setdefault("version_events", [])
+    actor = session.info.get("actor")
 
     for entity in session.new:
         if _is_versioned_entity(entity):
+            if actor:
+                if not getattr(entity, "created_by", None):
+                    entity.created_by = actor
+                if not getattr(entity, "updated_by", None):
+                    entity.updated_by = actor
             events.append((entity, "create", {}))
 
     for entity in session.dirty:
         if _is_versioned_entity(entity) and session.is_modified(entity, include_collections=True):
-            events.append((entity, "update", _compute_diff(entity)))
+            if getattr(entity, "id", None) is None:
+                continue
+
+            current_snapshot = _serialize_entity(entity)
+            previous_snapshot = _get_last_snapshot(session, entity.__tablename__, entity.id)
+
+            if previous_snapshot is not None:
+                snapshot_diff = _diff_snapshots(previous_snapshot, current_snapshot)
+                if not snapshot_diff:
+                    continue
+                entity.updated_at = datetime.utcnow()
+                if actor:
+                    entity.updated_by = actor
+                entity.lock_version += 1
+                events.append((entity, "update", snapshot_diff))
+            else:
+                column_diff = _compute_diff(entity)
+                if not column_diff:
+                    continue
+                entity.updated_at = datetime.utcnow()
+                if actor:
+                    entity.updated_by = actor
+                entity.lock_version += 1
+                events.append((entity, "update", column_diff))
 
     for entity in session.deleted:
         if _is_versioned_entity(entity):
@@ -193,16 +234,6 @@ def create_entity_versions(session, flush_context):
         ) or 0
 
         snapshot = _serialize_entity(entity)
-        if operation == "update":
-            previous_version = (
-                session.query(EntityVersion)
-                .filter_by(entity_type=entity_type, entity_id=entity_id, version=current_version)
-                .first()
-            )
-            if previous_version:
-                snapshot_diff = _diff_snapshots(previous_version.snapshot or {}, snapshot)
-                if snapshot_diff:
-                    diff = snapshot_diff
 
         version_row = EntityVersion(
             entity_type=entity_type,

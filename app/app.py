@@ -47,6 +47,10 @@ def _check_optimistic_lock(entity, expected_version, label):
     return True
 
 
+def _set_actor():
+    db.session.info["actor"] = _active_user()
+
+
 @app.route("/active-user", methods=["POST"])
 def set_active_user():
     session["active_user"] = request.form.get("active_user", "system").strip() or "system"
@@ -95,13 +99,11 @@ def trash():
 
 @app.route("/signals/create", methods=["POST"])
 def create_signal():
-    user = _active_user()
+    _set_actor()
     signal = Signal(
         frequency=float(request.form["frequency"]),
         modulation=request.form["modulation"],
         power=float(request.form["power"]),
-        created_by=user,
-        updated_by=user,
     )
     db.session.add(signal)
     db.session.commit()
@@ -110,25 +112,28 @@ def create_signal():
 
 @app.route("/signals/<int:signal_id>/edit", methods=["POST"])
 def edit_signal(signal_id):
-    user = _active_user()
+    _set_actor()
     signal = Signal.query.filter_by(id=signal_id, is_deleted=False).first_or_404()
     expected_version = _expected_version()
     if not _check_optimistic_lock(signal, expected_version, "signal"):
         return redirect(url_for("index"))
 
+    previous_lock_version = signal.lock_version
     signal.frequency = float(request.form["frequency"])
     signal.modulation = request.form["modulation"]
     signal.power = float(request.form["power"])
-    signal.updated_by = user
-    signal.updated_at = datetime.utcnow()
-    signal.lock_version += 1
+
     db.session.commit()
-    flash(f"Signal #{signal.id} updated.", "success")
+    if signal.lock_version == previous_lock_version:
+        flash(f"No changes for signal #{signal.id}.", "error")
+    else:
+        flash(f"Signal #{signal.id} updated.", "success")
     return redirect(url_for("index"))
 
 
 @app.route("/signals/<int:signal_id>/delete", methods=["POST"])
 def delete_signal(signal_id):
+    _set_actor()
     user = _active_user()
     signal = Signal.query.filter_by(id=signal_id, is_deleted=False).first_or_404()
     expected_version = _expected_version()
@@ -136,9 +141,6 @@ def delete_signal(signal_id):
         return redirect(url_for("index"))
 
     signal.soft_delete(user)
-    signal.updated_by = user
-    signal.updated_at = datetime.utcnow()
-    signal.lock_version += 1
     db.session.commit()
     flash(f"Signal #{signal.id} deleted (soft).", "success")
     return redirect(url_for("index"))
@@ -146,15 +148,13 @@ def delete_signal(signal_id):
 
 @app.route("/assets/create", methods=["POST"])
 def create_asset():
-    user = _active_user()
+    _set_actor()
     signal_ids = request.form.getlist("signal_ids")
     signals = Signal.query.filter(Signal.id.in_(signal_ids), Signal.is_deleted.is_(False)).all() if signal_ids else []
 
     asset = Asset(
         name=request.form["name"],
         description=request.form["description"],
-        created_by=user,
-        updated_by=user,
         signals=signals,
     )
     db.session.add(asset)
@@ -164,7 +164,7 @@ def create_asset():
 
 @app.route("/assets/<int:asset_id>/edit", methods=["POST"])
 def edit_asset(asset_id):
-    user = _active_user()
+    _set_actor()
     asset = Asset.query.filter_by(id=asset_id, is_deleted=False).first_or_404()
     expected_version = _expected_version()
     if not _check_optimistic_lock(asset, expected_version, "asset"):
@@ -173,19 +173,22 @@ def edit_asset(asset_id):
     signal_ids = request.form.getlist("signal_ids")
     selected_signals = Signal.query.filter(Signal.id.in_(signal_ids), Signal.is_deleted.is_(False)).all() if signal_ids else []
 
+    previous_lock_version = asset.lock_version
     asset.name = request.form["name"]
     asset.description = request.form["description"]
     asset.signals = selected_signals
-    asset.updated_by = user
-    asset.updated_at = datetime.utcnow()
-    asset.lock_version += 1
+
     db.session.commit()
-    flash(f"Asset #{asset.id} updated.", "success")
+    if asset.lock_version == previous_lock_version:
+        flash(f"No changes for asset #{asset.id}.", "error")
+    else:
+        flash(f"Asset #{asset.id} updated.", "success")
     return redirect(url_for("index"))
 
 
 @app.route("/assets/<int:asset_id>/delete", methods=["POST"])
 def delete_asset(asset_id):
+    _set_actor()
     user = _active_user()
     asset = Asset.query.filter_by(id=asset_id, is_deleted=False).first_or_404()
     expected_version = _expected_version()
@@ -193,9 +196,6 @@ def delete_asset(asset_id):
         return redirect(url_for("index"))
 
     asset.soft_delete(user)
-    asset.updated_by = user
-    asset.updated_at = datetime.utcnow()
-    asset.lock_version += 1
     db.session.commit()
     flash(f"Asset #{asset.id} deleted (soft).", "success")
     return redirect(url_for("index"))
