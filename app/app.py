@@ -5,22 +5,20 @@ from pathlib import Path
 import sys
 
 from flask import Flask, render_template, request, redirect, url_for
+from flask_migrate import Migrate
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from config import Config
-from models import db, Object, ObjectVersion
+from models import db, Object, EntityVersion
 
 app = Flask(__name__)
 app.config.from_object(Config)
 
 db.init_app(app)
-
-@app.before_request
-def create_tables():
-    db.create_all()
+migrate = Migrate(app, db)
 
 @app.route("/")
 def index():
@@ -54,9 +52,9 @@ def edit_object(object_id):
 @app.route("/versions/<int:object_id>")
 def versions(object_id):
     versions = (
-        ObjectVersion.query
-        .filter_by(object_id=object_id)
-        .order_by(ObjectVersion.version.desc())
+        EntityVersion.query
+        .filter_by(entity_type=Object.__tablename__, entity_id=object_id)
+        .order_by(EntityVersion.version.desc())
         .all()
     )
     return render_template("versions.html", versions=versions, object_id=object_id)

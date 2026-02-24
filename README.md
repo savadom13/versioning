@@ -4,9 +4,9 @@
 ## Features
 - Object versioning with audit trail
 - Snapshot + SHA256 hash protection
-- SQLAlchemy event-based automatic versioning
+- Generic SQLAlchemy event-based versioning for all entities
 - Tailwind CSS UI
-- SQLite for demo (MySQL ready)
+- MySQL via PyMySQL
 
 ## Setup
 
@@ -14,13 +14,27 @@
 python -m venv venv
 source venv/bin/activate  # Windows: venv\Scripts\activate
 pip install -r requirements.txt
+flask --app app/app.py db upgrade
 python app/app.py
 ```
 
-Open: http://127.0.0.1:5000
+Open: http://127.0.0.1:8000
 
 ## MySQL (Production)
 
 Set environment variable:
 
 DATABASE_URL=mysql+pymysql://user:password@localhost/dbname
+
+## Migrations
+
+```bash
+# First-time only (if you create a clean repo without migrations folder)
+flask --app app/app.py db init
+
+# Generate next migration after model changes
+flask --app app/app.py db migrate -m "describe change"
+
+# Apply migrations
+flask --app app/app.py db upgrade
+```
