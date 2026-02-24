@@ -3,6 +3,7 @@ from datetime import datetime
 import os
 from pathlib import Path
 import sys
+from functools import wraps
 
 from flask import Flask, flash, render_template, request, redirect, session, url_for
 from flask_migrate import Migrate
@@ -12,7 +13,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from config import Config
-from models import db, Asset, EntityVersion, Signal
+from models import db, Asset, EntityVersion, Signal, OptimisticLockError
 
 app = Flask(__name__)
 app.config.from_object(Config)
@@ -30,25 +31,39 @@ def _active_user():
     return session.get("active_user", "system")
 
 
-def _expected_version():
+def _set_actor():
+    db.session.info["actor"] = _active_user()
+
+
+def _expected_lock_version_from_request():
+    raw = request.form.get("lock_version") or (request.get_json(silent=True) or {}).get("lock_version")
     try:
-        return int(request.form.get("lock_version", "0"))
-    except ValueError:
+        return int(raw) if raw is not None else 0
+    except (ValueError, TypeError):
         return 0
 
 
-def _check_optimistic_lock(entity, expected_version, label):
-    if expected_version != entity.lock_version:
-        flash(
-            f"Conflict: {label} #{entity.id} was changed by another user. Reload and try again.",
-            "error",
-        )
-        return False
-    return True
+def require_optimistic_lock(Model):
+    """Set session.info so before_flush can check lock_version. Apply to edit/delete views."""
+    id_param = Model.__tablename__.rstrip("s") + "_id"
+
+    def decorator(f):
+        @wraps(f)
+        def wrapped(*args, **kwargs):
+            entity_id = kwargs.get(id_param)
+            if entity_id is None:
+                return redirect(url_for("index"))
+            db.session.info["expected_entity"] = (Model.__tablename__, entity_id)
+            db.session.info["expected_lock_version"] = _expected_lock_version_from_request()
+            return f(*args, **kwargs)
+        return wrapped
+    return decorator
 
 
-def _set_actor():
-    db.session.info["actor"] = _active_user()
+@app.errorhandler(OptimisticLockError)
+def handle_optimistic_lock_error(exc):
+    flash(str(exc), "error")
+    return redirect(url_for("index"))
 
 
 @app.route("/active-user", methods=["POST"])
@@ -111,13 +126,10 @@ def create_signal():
 
 
 @app.route("/signals/<int:signal_id>/edit", methods=["POST"])
+@require_optimistic_lock(Signal)
 def edit_signal(signal_id):
     _set_actor()
     signal = Signal.query.filter_by(id=signal_id, is_deleted=False).first_or_404()
-    expected_version = _expected_version()
-    if not _check_optimistic_lock(signal, expected_version, "signal"):
-        return redirect(url_for("index"))
-
     previous_lock_version = signal.lock_version
     signal.frequency = float(request.form["frequency"])
     signal.modulation = request.form["modulation"]
@@ -132,14 +144,11 @@ def edit_signal(signal_id):
 
 
 @app.route("/signals/<int:signal_id>/delete", methods=["POST"])
+@require_optimistic_lock(Signal)
 def delete_signal(signal_id):
     _set_actor()
     user = _active_user()
     signal = Signal.query.filter_by(id=signal_id, is_deleted=False).first_or_404()
-    expected_version = _expected_version()
-    if not _check_optimistic_lock(signal, expected_version, "signal"):
-        return redirect(url_for("index"))
-
     signal.soft_delete(user)
     db.session.commit()
     flash(f"Signal #{signal.id} deleted (soft).", "success")
@@ -163,13 +172,10 @@ def create_asset():
 
 
 @app.route("/assets/<int:asset_id>/edit", methods=["POST"])
+@require_optimistic_lock(Asset)
 def edit_asset(asset_id):
     _set_actor()
     asset = Asset.query.filter_by(id=asset_id, is_deleted=False).first_or_404()
-    expected_version = _expected_version()
-    if not _check_optimistic_lock(asset, expected_version, "asset"):
-        return redirect(url_for("index"))
-
     signal_ids = request.form.getlist("signal_ids")
     selected_signals = Signal.query.filter(Signal.id.in_(signal_ids), Signal.is_deleted.is_(False)).all() if signal_ids else []
 
@@ -187,14 +193,11 @@ def edit_asset(asset_id):
 
 
 @app.route("/assets/<int:asset_id>/delete", methods=["POST"])
+@require_optimistic_lock(Asset)
 def delete_asset(asset_id):
     _set_actor()
     user = _active_user()
     asset = Asset.query.filter_by(id=asset_id, is_deleted=False).first_or_404()
-    expected_version = _expected_version()
-    if not _check_optimistic_lock(asset, expected_version, "asset"):
-        return redirect(url_for("index"))
-
     asset.soft_delete(user)
     db.session.commit()
     flash(f"Asset #{asset.id} deleted (soft).", "success")
