@@ -54,7 +54,11 @@ def require_optimistic_lock(Model):
                 if request.path.startswith("/api/"):
                     return jsonify({"error": "Missing entity id"}), 400
                 return redirect(url_for("index"))
-            db.session.info["expected_entity"] = (Model.__tablename__, entity_id)
+            try:
+                eid = int(entity_id)
+            except (TypeError, ValueError):
+                eid = entity_id
+            db.session.info["expected_entity"] = (Model.__tablename__, eid)
             db.session.info["expected_lock_version"] = _expected_lock_version_from_request()
             return f(*args, **kwargs)
         return wrapped
@@ -143,6 +147,12 @@ def api_signals_create():
     return jsonify(signal_to_dict(signal)), 201
 
 
+def _record_entity_lock_at_load(entity):
+    """Store entity lock_version at load time for optimistic lock check during flush."""
+    if entity is not None and getattr(entity, "id", None) is not None:
+        db.session.info.setdefault("_entity_lock_at_load", {})[(entity.__tablename__, entity.id)] = entity.lock_version
+
+
 @api_bp.route("/signals/<int:signal_id>", methods=["PATCH"])
 @require_optimistic_lock(Signal)
 def api_signals_update(signal_id):
@@ -150,12 +160,19 @@ def api_signals_update(signal_id):
     signal = Signal.query.filter_by(id=signal_id, is_deleted=False).first()
     if not signal:
         return jsonify({"error": "Signal not found"}), 404
+    _record_entity_lock_at_load(signal)
     data = request.get_json(silent=True) or {}
+    previous_lock = signal.lock_version
     signal.frequency = float(data.get("frequency", signal.frequency))
     signal.modulation = str(data.get("modulation", signal.modulation))
     signal.power = float(data.get("power", signal.power))
     db.session.commit()
-    return jsonify(signal_to_dict(signal))
+    out = signal_to_dict(signal)
+    if signal.lock_version == previous_lock:
+        out["updated"] = False
+    else:
+        out["updated"] = True
+    return jsonify(out)
 
 
 @api_bp.route("/signals/<int:signal_id>", methods=["DELETE"])
@@ -165,6 +182,7 @@ def api_signals_delete(signal_id):
     signal = Signal.query.filter_by(id=signal_id, is_deleted=False).first()
     if not signal:
         return jsonify({"error": "Signal not found"}), 404
+    _record_entity_lock_at_load(signal)
     signal.soft_delete(_active_user())
     db.session.commit()
     return jsonify({"ok": True}), 200
@@ -199,14 +217,21 @@ def api_assets_update(asset_id):
     asset = Asset.query.filter_by(id=asset_id, is_deleted=False).first()
     if not asset:
         return jsonify({"error": "Asset not found"}), 404
+    _record_entity_lock_at_load(asset)
     data = request.get_json(silent=True) or {}
+    previous_lock = asset.lock_version
     signal_ids = data.get("signal_ids") or []
     selected_signals = Signal.query.filter(Signal.id.in_(signal_ids), Signal.is_deleted.is_(False)).all() if signal_ids else []
     asset.name = str(data.get("name", asset.name))
     asset.description = str(data.get("description", asset.description))
     asset.signals = selected_signals
     db.session.commit()
-    return jsonify(asset_to_dict(asset))
+    out = asset_to_dict(asset)
+    if asset.lock_version == previous_lock:
+        out["updated"] = False
+    else:
+        out["updated"] = True
+    return jsonify(out)
 
 
 @api_bp.route("/assets/<int:asset_id>", methods=["DELETE"])
@@ -216,6 +241,7 @@ def api_assets_delete(asset_id):
     asset = Asset.query.filter_by(id=asset_id, is_deleted=False).first()
     if not asset:
         return jsonify({"error": "Asset not found"}), 404
+    _record_entity_lock_at_load(asset)
     asset.soft_delete(_active_user())
     db.session.commit()
     return jsonify({"ok": True}), 200

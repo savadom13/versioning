@@ -7,7 +7,10 @@
         const el = document.getElementById("toast");
         el.classList.remove("hidden");
         const div = document.createElement("div");
-        div.className = type === "error" ? "bg-red-100 text-red-800 p-3 rounded shadow" : "bg-green-100 text-green-800 p-3 rounded shadow";
+        let cls = "bg-green-100 text-green-800 p-3 rounded shadow";
+        if (type === "error") cls = "bg-red-100 text-red-800 p-3 rounded shadow";
+        else if (type === "info") cls = "bg-blue-100 text-blue-800 p-3 rounded shadow";
+        div.className = cls;
         div.textContent = message;
         el.appendChild(div);
         setTimeout(function () {
@@ -110,7 +113,7 @@
                 '<input type="number" step="any" class="signal-pow border p-1 w-24" value="' + s.power + '">' +
                 '<button type="button" class="btn-signal-update bg-green-600 text-white px-3 py-1 rounded">Update</button>' +
                 '<button type="button" class="btn-signal-delete bg-red-600 text-white px-3 py-1 rounded">Delete</button>' +
-                '</div><input type="hidden" class="signal-lock" value="' + s.lock_version + '">' +
+                '</div><input type="hidden" class="signal-lock" value="' + (Number(s.lock_version) || 0) + '">' +
                 '</div>'
             );
         }).join("");
@@ -122,11 +125,16 @@
                 const freq = card.querySelector(".signal-freq").value;
                 const mod = card.querySelector(".signal-mod").value;
                 const pow = card.querySelector(".signal-pow").value;
-                const lock = card.querySelector(".signal-lock").value;
-                apiPatch("/signals/" + id, { frequency: parseFloat(freq), modulation: mod, power: parseFloat(pow), lock_version: parseInt(lock, 10) })
-                    .then(function (updated) {
-                        card.querySelector(".signal-lock").value = updated.lock_version;
-                        toast("Signal #" + id + " updated.", "success");
+                const lock = parseInt(card.querySelector(".signal-lock").value, 10);
+                if (isNaN(lock)) {
+                    toast("Please refresh the page and try again.", "error");
+                    return;
+                }
+                apiPatch("/signals/" + id, { frequency: parseFloat(freq), modulation: mod, power: parseFloat(pow), lock_version: lock })
+                    .then(function (res) {
+                        card.querySelector(".signal-lock").value = res.lock_version;
+                        if (res.updated === false) toast("No changes.", "info");
+                        else toast("Signal #" + id + " updated.", "success");
                     })
                     .catch(function (err) {
                         toast((err.body && err.body.error) || "Update failed", "error");
@@ -181,7 +189,7 @@
                 '<div class="signals-list max-h-48 overflow-y-auto space-y-1 asset-signals-list" data-signal-ids="' + escapeAttr(signalIds.join(",")) + '"></div></div></div>' +
                 '<button type="button" class="btn-asset-update bg-green-600 text-white px-3 py-1 rounded">Update</button> ' +
                 '<button type="button" class="btn-asset-delete bg-red-600 text-white px-3 py-1 rounded">Delete</button>' +
-                '<input type="hidden" class="asset-lock" value="' + a.lock_version + '">' +
+                '<input type="hidden" class="asset-lock" value="' + (Number(a.lock_version) || 0) + '">' +
                 '</div>'
             );
         }).join("");
@@ -211,10 +219,15 @@
                 const checked = card.querySelectorAll(".asset-signals-list input:checked");
                 const signal_ids = Array.from(checked).map(function (c) { return parseInt(c.value, 10); });
                 const lock = parseInt(card.querySelector(".asset-lock").value, 10);
+                if (isNaN(lock)) {
+                    toast("Please refresh the page and try again.", "error");
+                    return;
+                }
                 apiPatch("/assets/" + assetId, { name: name, description: description, signal_ids: signal_ids, lock_version: lock })
-                    .then(function (updated) {
-                        card.querySelector(".asset-lock").value = updated.lock_version;
-                        toast("Asset #" + assetId + " updated.", "success");
+                    .then(function (res) {
+                        card.querySelector(".asset-lock").value = res.lock_version;
+                        if (res.updated === false) toast("No changes.", "info");
+                        else toast("Asset #" + assetId + " updated.", "success");
                     })
                     .catch(function (err) {
                         toast((err.body && err.body.error) || "Update failed", "error");
