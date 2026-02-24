@@ -8,21 +8,75 @@ from sqlalchemy import event, func, inspect
 
 db = SQLAlchemy()
 
+asset_signals = db.Table(
+    "asset_signals",
+    db.Column("asset_id", db.Integer, db.ForeignKey("assets.id"), primary_key=True),
+    db.Column("signal_id", db.Integer, db.ForeignKey("signals.id"), primary_key=True),
+)
+
 
 class VersionedMixin:
     __versioned__ = True
-    __version_exclude__ = {"updated_at"}
-
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
-    updated_by = db.Column(db.String(64))
-
-
-class Object(db.Model, VersionedMixin):
-    __tablename__ = "objects"
+    __version_exclude__ = {"created_at", "updated_at"}
 
     id = db.Column(db.Integer, primary_key=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    created_by = db.Column(db.String(64), nullable=False)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    updated_by = db.Column(db.String(64), nullable=False)
+
+
+class SoftDeleteMixin:
+    is_deleted = db.Column(db.Boolean, default=False, nullable=False, index=True)
+    deleted_at = db.Column(db.DateTime, nullable=True)
+    deleted_by = db.Column(db.String(64), nullable=True)
+
+    def soft_delete(self, user):
+        self.is_deleted = True
+        self.deleted_at = datetime.utcnow()
+        self.deleted_by = user
+
+    @property
+    def trash_name(self):
+        return getattr(self, "name", None)
+
+
+class Signal(db.Model, VersionedMixin, SoftDeleteMixin):
+    __tablename__ = "signals"
+
+    frequency = db.Column(db.Float, nullable=False)
+    modulation = db.Column(db.String(50), nullable=False)
+    power = db.Column(db.Float, nullable=False)
+
+    assets = db.relationship(
+        "Asset",
+        secondary=asset_signals,
+        back_populates="signals",
+        lazy="select",
+    )
+
+    @property
+    def trash_name(self):
+        return f"f={self.frequency}, {self.modulation}"
+
+
+class Asset(db.Model, VersionedMixin, SoftDeleteMixin):
+    __tablename__ = "assets"
+
     name = db.Column(db.String(255), nullable=False)
-    status = db.Column(db.String(50), nullable=False)
+    description = db.Column(db.Text, nullable=False)
+
+    signals = db.relationship(
+        "Signal",
+        secondary=asset_signals,
+        back_populates="assets",
+        lazy="select",
+    )
+
+    def __version_snapshot__(self):
+        data = _serialize_columns(self)
+        data["signal_ids"] = sorted(signal.id for signal in self.signals)
+        return data
 
 
 class EntityVersion(db.Model):
@@ -42,14 +96,13 @@ class EntityVersion(db.Model):
     changed_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
     changed_by = db.Column(db.String(64))
 
-
 def _json_value(value):
     if isinstance(value, datetime):
         return value.isoformat()
     return value
 
 
-def _serialize_entity(entity):
+def _serialize_columns(entity):
     exclude = set(getattr(entity, "__version_exclude__", set()))
     data = {}
     for column in entity.__table__.columns:
@@ -59,9 +112,27 @@ def _serialize_entity(entity):
     return data
 
 
+def _serialize_entity(entity):
+    custom_serializer = getattr(entity, "__version_snapshot__", None)
+    if callable(custom_serializer):
+        return custom_serializer()
+    return _serialize_columns(entity)
+
+
 def _calculate_hash(data):
     payload = json.dumps(data, sort_keys=True, ensure_ascii=True, default=str)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _diff_snapshots(old_snapshot, new_snapshot):
+    diff = {}
+    keys = set(old_snapshot.keys()) | set(new_snapshot.keys())
+    for key in keys:
+        old_value = old_snapshot.get(key)
+        new_value = new_snapshot.get(key)
+        if old_value != new_value:
+            diff[key] = {"old": old_value, "new": new_value}
+    return diff
 
 
 def _compute_diff(entity):
@@ -97,7 +168,7 @@ def collect_version_events(session, flush_context, instances):
             events.append((entity, "create", {}))
 
     for entity in session.dirty:
-        if _is_versioned_entity(entity) and session.is_modified(entity, include_collections=False):
+        if _is_versioned_entity(entity) and session.is_modified(entity, include_collections=True):
             events.append((entity, "update", _compute_diff(entity)))
 
     for entity in session.deleted:
@@ -121,6 +192,17 @@ def create_entity_versions(session, flush_context):
         ) or 0
 
         snapshot = _serialize_entity(entity)
+        if operation == "update":
+            previous_version = (
+                session.query(EntityVersion)
+                .filter_by(entity_type=entity_type, entity_id=entity_id, version=current_version)
+                .first()
+            )
+            if previous_version:
+                snapshot_diff = _diff_snapshots(previous_version.snapshot or {}, snapshot)
+                if snapshot_diff:
+                    diff = snapshot_diff
+
         version_row = EntityVersion(
             entity_type=entity_type,
             entity_id=entity_id,

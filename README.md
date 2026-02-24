@@ -1,12 +1,13 @@
 
-# Flask Production-Grade Object Versioning Demo
+# Flask Production-Grade Entity Versioning Demo
 
 ## Features
-- Object versioning with audit trail
+- Multi-entity versioning (signals and assets) with audit trail
 - Snapshot + SHA256 hash protection
 - Generic SQLAlchemy event-based versioning for all entities
 - Tailwind CSS UI
 - MySQL via PyMySQL
+- Demo active user selector (used for `created_by` / `updated_by`)
 
 ## Setup
 
