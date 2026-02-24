@@ -17,13 +17,14 @@ asset_signals = db.Table(
 
 class VersionedMixin:
     __versioned__ = True
-    __version_exclude__ = {"created_at", "updated_at"}
+    __version_exclude__ = {"created_at", "updated_at", "lock_version"}
 
     id = db.Column(db.Integer, primary_key=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
     created_by = db.Column(db.String(64), nullable=False)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
     updated_by = db.Column(db.String(64), nullable=False)
+    lock_version = db.Column(db.Integer, default=1, nullable=False)
 
 
 class SoftDeleteMixin:

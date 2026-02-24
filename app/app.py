@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 import sys
 
-from flask import Flask, render_template, request, redirect, session, url_for
+from flask import Flask, flash, render_template, request, redirect, session, url_for
 from flask_migrate import Migrate
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -28,6 +28,23 @@ ENTITY_MODELS = {
 
 def _active_user():
     return session.get("active_user", "system")
+
+
+def _expected_version():
+    try:
+        return int(request.form.get("lock_version", "0"))
+    except ValueError:
+        return 0
+
+
+def _check_optimistic_lock(entity, expected_version, label):
+    if expected_version != entity.lock_version:
+        flash(
+            f"Conflict: {label} #{entity.id} was changed by another user. Reload and try again.",
+            "error",
+        )
+        return False
+    return True
 
 
 @app.route("/active-user", methods=["POST"])
@@ -95,12 +112,18 @@ def create_signal():
 def edit_signal(signal_id):
     user = _active_user()
     signal = Signal.query.filter_by(id=signal_id, is_deleted=False).first_or_404()
+    expected_version = _expected_version()
+    if not _check_optimistic_lock(signal, expected_version, "signal"):
+        return redirect(url_for("index"))
+
     signal.frequency = float(request.form["frequency"])
     signal.modulation = request.form["modulation"]
     signal.power = float(request.form["power"])
     signal.updated_by = user
     signal.updated_at = datetime.utcnow()
+    signal.lock_version += 1
     db.session.commit()
+    flash(f"Signal #{signal.id} updated.", "success")
     return redirect(url_for("index"))
 
 
@@ -108,10 +131,16 @@ def edit_signal(signal_id):
 def delete_signal(signal_id):
     user = _active_user()
     signal = Signal.query.filter_by(id=signal_id, is_deleted=False).first_or_404()
+    expected_version = _expected_version()
+    if not _check_optimistic_lock(signal, expected_version, "signal"):
+        return redirect(url_for("index"))
+
     signal.soft_delete(user)
     signal.updated_by = user
     signal.updated_at = datetime.utcnow()
+    signal.lock_version += 1
     db.session.commit()
+    flash(f"Signal #{signal.id} deleted (soft).", "success")
     return redirect(url_for("index"))
 
 
@@ -137,6 +166,10 @@ def create_asset():
 def edit_asset(asset_id):
     user = _active_user()
     asset = Asset.query.filter_by(id=asset_id, is_deleted=False).first_or_404()
+    expected_version = _expected_version()
+    if not _check_optimistic_lock(asset, expected_version, "asset"):
+        return redirect(url_for("index"))
+
     signal_ids = request.form.getlist("signal_ids")
     selected_signals = Signal.query.filter(Signal.id.in_(signal_ids), Signal.is_deleted.is_(False)).all() if signal_ids else []
 
@@ -145,7 +178,9 @@ def edit_asset(asset_id):
     asset.signals = selected_signals
     asset.updated_by = user
     asset.updated_at = datetime.utcnow()
+    asset.lock_version += 1
     db.session.commit()
+    flash(f"Asset #{asset.id} updated.", "success")
     return redirect(url_for("index"))
 
 
@@ -153,10 +188,16 @@ def edit_asset(asset_id):
 def delete_asset(asset_id):
     user = _active_user()
     asset = Asset.query.filter_by(id=asset_id, is_deleted=False).first_or_404()
+    expected_version = _expected_version()
+    if not _check_optimistic_lock(asset, expected_version, "asset"):
+        return redirect(url_for("index"))
+
     asset.soft_delete(user)
     asset.updated_by = user
     asset.updated_at = datetime.utcnow()
+    asset.lock_version += 1
     db.session.commit()
+    flash(f"Asset #{asset.id} deleted (soft).", "success")
     return redirect(url_for("index"))
 
 

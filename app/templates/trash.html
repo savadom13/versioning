@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <title>Trash</title>
+</head>
+<body class="bg-gray-100 p-8">
+    <div class="flex items-center justify-between mb-6">
+        <h1 class="text-2xl font-bold">Deleted Objects</h1>
+        <a href="/" class="text-blue-600">&larr; Back</a>
+    </div>
+
+    <div class="space-y-4">
+        {% for item in deleted_items %}
+        <div class="bg-white p-4 rounded shadow">
+            <p class="font-semibold">{{ item.entity_type }} #{{ item.id }}</p>
+            <p class="text-sm">Name: {{ item.name or "n/a" }}</p>
+            <p class="text-sm text-gray-500">
+                Deleted by {{ item.deleted_by }} at {{ item.deleted_at }}
+            </p>
+        </div>
+        {% else %}
+        <div class="bg-white p-4 rounded shadow text-gray-600">Trash is empty</div>
+        {% endfor %}
+    </div>
+</body>
+</html>
