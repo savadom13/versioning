@@ -191,7 +191,6 @@ def check_optimistic_lock(session, flush_context, instances):
         if (entity.__tablename__, entity.id) != (entity_type, entity_id):
             continue
         if entity.lock_version != expected_version:
-            session.rollback()
             raise OptimisticLockError(
                 f"Conflict: entity {entity_type}#{entity_id} was changed by another user. Reload and try again."
             )

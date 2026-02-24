@@ -1,11 +1,10 @@
 
-from datetime import datetime
 import os
 from pathlib import Path
 import sys
 from functools import wraps
 
-from flask import Flask, flash, render_template, request, redirect, session, url_for
+from flask import Blueprint, Flask, flash, jsonify, request, redirect, session, url_for, send_from_directory
 from flask_migrate import Migrate
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -15,7 +14,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from config import Config
 from models import db, Asset, EntityVersion, Signal, OptimisticLockError
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder=str(Path(__file__).resolve().parent / "static"), static_url_path="/static")
 app.config.from_object(Config)
 
 db.init_app(app)
@@ -52,6 +51,8 @@ def require_optimistic_lock(Model):
         def wrapped(*args, **kwargs):
             entity_id = kwargs.get(id_param)
             if entity_id is None:
+                if request.path.startswith("/api/"):
+                    return jsonify({"error": "Missing entity id"}), 400
                 return redirect(url_for("index"))
             db.session.info["expected_entity"] = (Model.__tablename__, entity_id)
             db.session.info["expected_lock_version"] = _expected_lock_version_from_request()
@@ -62,166 +63,215 @@ def require_optimistic_lock(Model):
 
 @app.errorhandler(OptimisticLockError)
 def handle_optimistic_lock_error(exc):
+    if request.path.startswith("/api/"):
+        return jsonify({"error": str(exc)}), 409
     flash(str(exc), "error")
     return redirect(url_for("index"))
 
 
-@app.route("/active-user", methods=["POST"])
-def set_active_user():
-    session["active_user"] = request.form.get("active_user", "system").strip() or "system"
-    return redirect(url_for("index"))
+def signal_to_dict(signal):
+    return {
+        "id": signal.id,
+        "frequency": signal.frequency,
+        "modulation": signal.modulation,
+        "power": signal.power,
+        "created_by": signal.created_by,
+        "updated_by": signal.updated_by,
+        "lock_version": signal.lock_version,
+    }
 
 
-@app.route("/")
-def index():
+def asset_to_dict(asset):
+    return {
+        "id": asset.id,
+        "name": asset.name,
+        "description": asset.description,
+        "signal_ids": sorted(s.id for s in asset.signals),
+        "created_by": asset.created_by,
+        "updated_by": asset.updated_by,
+        "lock_version": asset.lock_version,
+    }
+
+
+def version_to_dict(v):
+    return {
+        "id": v.id,
+        "entity_type": v.entity_type,
+        "entity_id": v.entity_id,
+        "version": v.version,
+        "operation": v.operation,
+        "snapshot": v.snapshot,
+        "diff": v.diff,
+        "hash": v.hash,
+        "changed_at": v.changed_at.isoformat() if v.changed_at else None,
+        "changed_by": v.changed_by,
+    }
+
+
+api_bp = Blueprint("api", __name__, url_prefix="/api")
+
+
+@api_bp.route("/session", methods=["GET"])
+def api_session_get():
+    return jsonify({"active_user": _active_user()})
+
+
+@api_bp.route("/session", methods=["POST"])
+def api_session_post():
+    data = request.get_json(silent=True) or {}
+    session["active_user"] = (data.get("active_user") or "system").strip() or "system"
+    return jsonify({"active_user": session["active_user"]})
+
+
+@api_bp.route("/signals", methods=["GET"])
+def api_signals_list():
     signals = Signal.query.filter_by(is_deleted=False).order_by(Signal.id.desc()).all()
-    assets = Asset.query.filter_by(is_deleted=False).order_by(Asset.id.desc()).all()
-    return render_template(
-        "index.html",
-        active_user=_active_user(),
-        signals=signals,
-        assets=assets,
-        all_signals=signals,
-    )
+    return jsonify([signal_to_dict(s) for s in signals])
 
 
-@app.route("/trash")
-def trash():
-    deleted_items = []
-    for signal in Signal.query.filter_by(is_deleted=True).all():
-        deleted_items.append(
-            {
-                "entity_type": "signals",
-                "id": signal.id,
-                "name": signal.trash_name,
-                "deleted_at": signal.deleted_at,
-                "deleted_by": signal.deleted_by,
-            }
-        )
-    for asset in Asset.query.filter_by(is_deleted=True).all():
-        deleted_items.append(
-            {
-                "entity_type": "assets",
-                "id": asset.id,
-                "name": asset.trash_name,
-                "deleted_at": asset.deleted_at,
-                "deleted_by": asset.deleted_by,
-            }
-        )
-    deleted_items.sort(key=lambda x: x["deleted_at"] or datetime.min, reverse=True)
-    return render_template("trash.html", deleted_items=deleted_items)
-
-
-@app.route("/signals/create", methods=["POST"])
-def create_signal():
+@api_bp.route("/signals", methods=["POST"])
+def api_signals_create():
     _set_actor()
+    data = request.get_json(silent=True) or {}
     signal = Signal(
-        frequency=float(request.form["frequency"]),
-        modulation=request.form["modulation"],
-        power=float(request.form["power"]),
+        frequency=float(data.get("frequency", 0)),
+        modulation=str(data.get("modulation", "")),
+        power=float(data.get("power", 0)),
     )
     db.session.add(signal)
     db.session.commit()
-    return redirect(url_for("index"))
+    return jsonify(signal_to_dict(signal)), 201
 
 
-@app.route("/signals/<int:signal_id>/edit", methods=["POST"])
+@api_bp.route("/signals/<int:signal_id>", methods=["PATCH"])
 @require_optimistic_lock(Signal)
-def edit_signal(signal_id):
+def api_signals_update(signal_id):
     _set_actor()
-    signal = Signal.query.filter_by(id=signal_id, is_deleted=False).first_or_404()
-    previous_lock_version = signal.lock_version
-    signal.frequency = float(request.form["frequency"])
-    signal.modulation = request.form["modulation"]
-    signal.power = float(request.form["power"])
-
+    signal = Signal.query.filter_by(id=signal_id, is_deleted=False).first()
+    if not signal:
+        return jsonify({"error": "Signal not found"}), 404
+    data = request.get_json(silent=True) or {}
+    signal.frequency = float(data.get("frequency", signal.frequency))
+    signal.modulation = str(data.get("modulation", signal.modulation))
+    signal.power = float(data.get("power", signal.power))
     db.session.commit()
-    if signal.lock_version == previous_lock_version:
-        flash(f"No changes for signal #{signal.id}.", "error")
-    else:
-        flash(f"Signal #{signal.id} updated.", "success")
-    return redirect(url_for("index"))
+    return jsonify(signal_to_dict(signal))
 
 
-@app.route("/signals/<int:signal_id>/delete", methods=["POST"])
+@api_bp.route("/signals/<int:signal_id>", methods=["DELETE"])
 @require_optimistic_lock(Signal)
-def delete_signal(signal_id):
+def api_signals_delete(signal_id):
     _set_actor()
-    user = _active_user()
-    signal = Signal.query.filter_by(id=signal_id, is_deleted=False).first_or_404()
-    signal.soft_delete(user)
+    signal = Signal.query.filter_by(id=signal_id, is_deleted=False).first()
+    if not signal:
+        return jsonify({"error": "Signal not found"}), 404
+    signal.soft_delete(_active_user())
     db.session.commit()
-    flash(f"Signal #{signal.id} deleted (soft).", "success")
-    return redirect(url_for("index"))
+    return jsonify({"ok": True}), 200
 
 
-@app.route("/assets/create", methods=["POST"])
-def create_asset():
+@api_bp.route("/assets", methods=["GET"])
+def api_assets_list():
+    assets = Asset.query.filter_by(is_deleted=False).order_by(Asset.id.desc()).all()
+    return jsonify([asset_to_dict(a) for a in assets])
+
+
+@api_bp.route("/assets", methods=["POST"])
+def api_assets_create():
     _set_actor()
-    signal_ids = request.form.getlist("signal_ids")
+    data = request.get_json(silent=True) or {}
+    signal_ids = data.get("signal_ids") or []
     signals = Signal.query.filter(Signal.id.in_(signal_ids), Signal.is_deleted.is_(False)).all() if signal_ids else []
-
     asset = Asset(
-        name=request.form["name"],
-        description=request.form["description"],
+        name=str(data.get("name", "")),
+        description=str(data.get("description", "")),
         signals=signals,
     )
     db.session.add(asset)
     db.session.commit()
-    return redirect(url_for("index"))
+    return jsonify(asset_to_dict(asset)), 201
 
 
-@app.route("/assets/<int:asset_id>/edit", methods=["POST"])
+@api_bp.route("/assets/<int:asset_id>", methods=["PATCH"])
 @require_optimistic_lock(Asset)
-def edit_asset(asset_id):
+def api_assets_update(asset_id):
     _set_actor()
-    asset = Asset.query.filter_by(id=asset_id, is_deleted=False).first_or_404()
-    signal_ids = request.form.getlist("signal_ids")
+    asset = Asset.query.filter_by(id=asset_id, is_deleted=False).first()
+    if not asset:
+        return jsonify({"error": "Asset not found"}), 404
+    data = request.get_json(silent=True) or {}
+    signal_ids = data.get("signal_ids") or []
     selected_signals = Signal.query.filter(Signal.id.in_(signal_ids), Signal.is_deleted.is_(False)).all() if signal_ids else []
-
-    previous_lock_version = asset.lock_version
-    asset.name = request.form["name"]
-    asset.description = request.form["description"]
+    asset.name = str(data.get("name", asset.name))
+    asset.description = str(data.get("description", asset.description))
     asset.signals = selected_signals
-
     db.session.commit()
-    if asset.lock_version == previous_lock_version:
-        flash(f"No changes for asset #{asset.id}.", "error")
-    else:
-        flash(f"Asset #{asset.id} updated.", "success")
-    return redirect(url_for("index"))
+    return jsonify(asset_to_dict(asset))
 
 
-@app.route("/assets/<int:asset_id>/delete", methods=["POST"])
+@api_bp.route("/assets/<int:asset_id>", methods=["DELETE"])
 @require_optimistic_lock(Asset)
-def delete_asset(asset_id):
+def api_assets_delete(asset_id):
     _set_actor()
-    user = _active_user()
-    asset = Asset.query.filter_by(id=asset_id, is_deleted=False).first_or_404()
-    asset.soft_delete(user)
+    asset = Asset.query.filter_by(id=asset_id, is_deleted=False).first()
+    if not asset:
+        return jsonify({"error": "Asset not found"}), 404
+    asset.soft_delete(_active_user())
     db.session.commit()
-    flash(f"Asset #{asset.id} deleted (soft).", "success")
-    return redirect(url_for("index"))
+    return jsonify({"ok": True}), 200
 
 
-@app.route("/versions/<entity_type>/<int:entity_id>")
-def versions(entity_type, entity_id):
+@api_bp.route("/trash", methods=["GET"])
+def api_trash_list():
+    deleted_items = []
+    for signal in Signal.query.filter_by(is_deleted=True).all():
+        deleted_items.append({
+            "entity_type": "signals",
+            "id": signal.id,
+            "name": signal.trash_name,
+            "deleted_at": signal.deleted_at.isoformat() if signal.deleted_at else None,
+            "deleted_by": signal.deleted_by,
+        })
+    for asset in Asset.query.filter_by(is_deleted=True).all():
+        deleted_items.append({
+            "entity_type": "assets",
+            "id": asset.id,
+            "name": asset.trash_name,
+            "deleted_at": asset.deleted_at.isoformat() if asset.deleted_at else None,
+            "deleted_by": asset.deleted_by,
+        })
+    deleted_items.sort(key=lambda x: x["deleted_at"] or "", reverse=True)
+    return jsonify(deleted_items)
+
+
+@api_bp.route("/versions/<entity_type>/<int:entity_id>", methods=["GET"])
+def api_versions_list(entity_type, entity_id):
     model = ENTITY_MODELS.get(entity_type)
     if model is None:
-        return "Unknown entity type", 404
-
+        return jsonify({"error": "Unknown entity type"}), 404
     versions = (
         EntityVersion.query
         .filter_by(entity_type=model.__tablename__, entity_id=entity_id)
         .order_by(EntityVersion.version.desc())
         .all()
     )
-    return render_template(
-        "versions.html",
-        versions=versions,
-        entity_type=entity_type,
-        entity_id=entity_id,
-    )
+    return jsonify([version_to_dict(v) for v in versions])
+
+
+app.register_blueprint(api_bp)
+
+
+@app.route("/")
+def index():
+    return send_from_directory(app.static_folder, "index.html")
+
+
+@app.route("/<path:path>")
+def spa_fallback(path):
+    if path.startswith("api/"):
+        return jsonify({"error": "Not found"}), 404
+    return send_from_directory(app.static_folder, "index.html")
+
 
 if __name__ == "__main__":
     host = os.environ.get("FLASK_HOST", "127.0.0.1")
