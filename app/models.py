@@ -25,6 +25,7 @@ class VersionedMixin:
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
     updated_by = db.Column(db.String(64), nullable=False)
     lock_version = db.Column(db.Integer, default=1, nullable=False)
+    __mapper_args__ = {"version_id_col": lock_version}
 
 
 class SoftDeleteMixin:
@@ -176,47 +177,8 @@ class OptimisticLockError(Exception):
     """Raised when entity lock_version does not match the version sent by the client."""
 
 
-def _check_optimistic_lock_in_session(session):
-    """Raise OptimisticLockError if expected lock_version does not match. Call before any lock_version change."""
-    expected = session.info.get("expected_entity")
-    expected_version = session.info.get("expected_lock_version")
-    if expected is None:
-        return
-    entity_type, entity_id = expected
-    try:
-        expected_version_int = int(expected_version)
-    except (TypeError, ValueError):
-        expected_version_int = 0
-    # Prefer lock_version captured at load time (avoids relationship/flush quirks, e.g. on Asset)
-    lock_at_load = session.info.get("_entity_lock_at_load") or {}
-    key = (entity_type, int(entity_id))
-    for entity in list(session.dirty) + list(session.deleted):
-        if not _is_versioned_entity(entity):
-            continue
-        try:
-            eid = int(entity.id)
-        except (TypeError, ValueError):
-            continue
-        if (entity.__tablename__, eid) != key:
-            continue
-        if key in lock_at_load:
-            entity_version = int(lock_at_load[key])
-        else:
-            try:
-                entity_version = int(entity.lock_version)
-            except (TypeError, ValueError):
-                entity_version = 0
-        if entity_version != expected_version_int:
-            raise OptimisticLockError(
-                f"Conflict: entity {entity_type}#{entity_id} was changed by another user. Reload and try again."
-            )
-        break
-
-
 @event.listens_for(db.session.__class__, "before_flush")
 def collect_version_events(session, flush_context, instances):
-    _check_optimistic_lock_in_session(session)
-
     events = session.info.setdefault("version_events", [])
     actor = session.info.get("actor")
 
@@ -244,7 +206,6 @@ def collect_version_events(session, flush_context, instances):
                 entity.updated_at = datetime.utcnow()
                 if actor:
                     entity.updated_by = actor
-                entity.lock_version += 1
                 events.append((entity, "update", snapshot_diff))
             else:
                 column_diff = _compute_diff(entity)
@@ -253,7 +214,6 @@ def collect_version_events(session, flush_context, instances):
                 entity.updated_at = datetime.utcnow()
                 if actor:
                     entity.updated_by = actor
-                entity.lock_version += 1
                 events.append((entity, "update", column_diff))
 
     for entity in session.deleted:

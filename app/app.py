@@ -1,8 +1,6 @@
 import os
 from pathlib import Path
 import sys
-from functools import wraps
-
 from flask import Blueprint, Flask, flash, jsonify, request, redirect, session, url_for, send_from_directory
 from flask_migrate import Migrate
 from flask_jwt_extended import (
@@ -17,6 +15,8 @@ from pydantic import ValidationError
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+from sqlalchemy.orm.exc import StaleDataError
 
 from config import Config
 from models import db, Asset, EntityVersion, Signal, OptimisticLockError
@@ -60,6 +60,9 @@ def _set_actor():
     db.session.info["actor"] = _active_user()
 
 
+CONFLICT_MSG = "Conflict: entity was changed by another user. Reload and try again."
+
+
 def _expected_lock_version_from_request():
     raw = request.form.get("lock_version")
     if raw is None and request.is_json:
@@ -73,27 +76,20 @@ def _expected_lock_version_from_request():
         return 0
 
 
-def require_optimistic_lock(Model):
-    """Set session.info so before_flush can check lock_version. Apply to edit/delete views."""
-    id_param = Model.__tablename__.rstrip("s") + "_id"
-
-    def decorator(f):
-        @wraps(f)
-        def wrapped(*args, **kwargs):
-            entity_id = kwargs.get(id_param)
-            if entity_id is None:
-            if request.path.startswith("/api/"):
-                return jsonify(ErrorResponse(error="Missing entity id").model_dump()), 400
-                return redirect(url_for("index"))
-            try:
-                eid = int(entity_id)
-            except (TypeError, ValueError):
-                eid = entity_id
-            db.session.info["expected_entity"] = (Model.__tablename__, eid)
-            db.session.info["expected_lock_version"] = _expected_lock_version_from_request()
-            return f(*args, **kwargs)
-        return wrapped
-    return decorator
+def _check_lock_version(entity, expected_version):
+    """Return 409 response if entity.lock_version != expected_version; else None."""
+    if entity is None:
+        return None
+    try:
+        current = int(entity.lock_version)
+    except (TypeError, ValueError):
+        current = 0
+    if current != expected_version:
+        if request.path.startswith("/api/"):
+            return jsonify(ErrorResponse(error=CONFLICT_MSG).model_dump()), 409
+        flash(CONFLICT_MSG, "error")
+        return redirect(url_for("index"))
+    return None
 
 
 @app.errorhandler(OptimisticLockError)
@@ -101,6 +97,14 @@ def handle_optimistic_lock_error(exc):
     if request.path.startswith("/api/"):
         return jsonify(ErrorResponse(error=str(exc)).model_dump()), 409
     flash(str(exc), "error")
+    return redirect(url_for("index"))
+
+
+@app.errorhandler(StaleDataError)
+def handle_stale_data_error(exc):
+    if request.path.startswith("/api/"):
+        return jsonify(ErrorResponse(error=CONFLICT_MSG).model_dump()), 409
+    flash(CONFLICT_MSG, "error")
     return redirect(url_for("index"))
 
 
@@ -176,20 +180,15 @@ def api_signals_create():
     return jsonify(signal_to_response(signal)), 201
 
 
-def _record_entity_lock_at_load(entity):
-    """Store entity lock_version at load time for optimistic lock check during flush."""
-    if entity is not None and getattr(entity, "id", None) is not None:
-        db.session.info.setdefault("_entity_lock_at_load", {})[(entity.__tablename__, entity.id)] = entity.lock_version
-
-
 @api_bp.route("/signals/<int:signal_id>", methods=["PATCH"])
-@require_optimistic_lock(Signal)
 def api_signals_update(signal_id):
     _set_actor()
     signal = Signal.query.filter_by(id=signal_id, is_deleted=False).first()
     if not signal:
         return jsonify(ErrorResponse(error="Signal not found").model_dump()), 404
-    _record_entity_lock_at_load(signal)
+    conflict = _check_lock_version(signal, _expected_lock_version_from_request())
+    if conflict is not None:
+        return conflict
     body = request.get_json(silent=True) or {}
     req = SignalUpdateRequest.model_validate(body)
     previous_lock = signal.lock_version
@@ -205,13 +204,14 @@ def api_signals_update(signal_id):
 
 
 @api_bp.route("/signals/<int:signal_id>", methods=["DELETE"])
-@require_optimistic_lock(Signal)
 def api_signals_delete(signal_id):
     _set_actor()
     signal = Signal.query.filter_by(id=signal_id, is_deleted=False).first()
     if not signal:
         return jsonify(ErrorResponse(error="Signal not found").model_dump()), 404
-    _record_entity_lock_at_load(signal)
+    conflict = _check_lock_version(signal, _expected_lock_version_from_request())
+    if conflict is not None:
+        return conflict
     signal.soft_delete(_active_user())
     db.session.commit()
     return jsonify({"ok": True}), 200
@@ -240,13 +240,14 @@ def api_assets_create():
 
 
 @api_bp.route("/assets/<int:asset_id>", methods=["PATCH"])
-@require_optimistic_lock(Asset)
 def api_assets_update(asset_id):
     _set_actor()
     asset = Asset.query.filter_by(id=asset_id, is_deleted=False).first()
     if not asset:
         return jsonify(ErrorResponse(error="Asset not found").model_dump()), 404
-    _record_entity_lock_at_load(asset)
+    conflict = _check_lock_version(asset, _expected_lock_version_from_request())
+    if conflict is not None:
+        return conflict
     body = request.get_json(silent=True) or {}
     req = AssetUpdateRequest.model_validate(body)
     previous_lock = asset.lock_version
@@ -267,13 +268,14 @@ def api_assets_update(asset_id):
 
 
 @api_bp.route("/assets/<int:asset_id>", methods=["DELETE"])
-@require_optimistic_lock(Asset)
 def api_assets_delete(asset_id):
     _set_actor()
     asset = Asset.query.filter_by(id=asset_id, is_deleted=False).first()
     if not asset:
         return jsonify(ErrorResponse(error="Asset not found").model_dump()), 404
-    _record_entity_lock_at_load(asset)
+    conflict = _check_lock_version(asset, _expected_lock_version_from_request())
+    if conflict is not None:
+        return conflict
     asset.soft_delete(_active_user())
     db.session.commit()
     return jsonify({"ok": True}), 200
