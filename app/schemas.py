@@ -128,6 +128,19 @@ class TrashItemResponse(BaseResponse):
     deleted_by: str | None
 
 
+# --- Changes (global history) ---
+
+
+class ChangeRecordResponse(BaseResponse):
+    """Single row for the changes history table."""
+    date: str
+    who: str
+    operation: str
+    entity_type: str
+    entity_id: int
+    what_changed: list[str]
+
+
 # --- Versions ---
 
 
@@ -186,4 +199,41 @@ def version_to_response(v) -> dict:
         "hash": v.hash,
         "changed_at": v.changed_at.isoformat() if v.changed_at else None,
         "changed_by": v.changed_by,
+    }
+
+
+def _format_change_value(value: Any) -> str:
+    if value is None:
+        return "—"
+    if isinstance(value, (list, tuple)):
+        return str(value)
+    return str(value)
+
+
+def change_record_to_response(v: "EntityVersion") -> dict:
+    """Build a change record for the history table from an EntityVersion."""
+    date = v.changed_at.isoformat() if v.changed_at else ""
+    who = v.changed_by if v.changed_by else "—"
+    what_changed: list[str] = []
+    if v.operation == "update" and v.diff:
+        for key, pair in v.diff.items():
+            if isinstance(pair, dict) and "old" in pair and "new" in pair:
+                old_s = _format_change_value(pair["old"])
+                new_s = _format_change_value(pair["new"])
+                if old_s != new_s:
+                    what_changed.append(f"{key}: {old_s} → {new_s}")
+    elif v.operation == "create" and v.snapshot:
+        for key, val in v.snapshot.items():
+            new_s = _format_change_value(val)
+            if new_s != "—":
+                what_changed.append(f"{key}: — → {new_s}")
+    elif v.operation == "delete":
+        what_changed.append("—")
+    return {
+        "date": date,
+        "who": who,
+        "operation": v.operation,
+        "entity_type": v.entity_type,
+        "entity_id": v.entity_id,
+        "what_changed": what_changed,
     }

@@ -32,6 +32,7 @@ from schemas import (
     signal_to_response,
     asset_to_response,
     version_to_response,
+    change_record_to_response,
 )
 
 app = Flask(__name__, static_folder=str(Path(__file__).resolve().parent / "static"), static_url_path="/static")
@@ -282,6 +283,23 @@ def api_assets_delete(asset_id):
     asset.soft_delete(_active_user())
     db.session.commit()
     return jsonify({"ok": True}), 200
+
+
+@api_bp.route("/changes", methods=["GET"])
+def api_changes_list():
+    """List all versioning events (changes) for the history table."""
+    limit = request.args.get("limit", type=int, default=100)
+    offset = request.args.get("offset", type=int, default=0)
+    limit = min(max(1, limit), 500)
+    offset = max(0, offset)
+    versions = (
+        EntityVersion.query
+        .order_by(EntityVersion.changed_at.desc())
+        .limit(limit)
+        .offset(offset)
+        .all()
+    )
+    return jsonify([change_record_to_response(v) for v in versions])
 
 
 @api_bp.route("/trash", methods=["GET"])

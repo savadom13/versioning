@@ -121,12 +121,14 @@
             return { screen: "versions", entityType: parts[1], entityId: parseInt(parts[2], 10) };
         }
         if (parts[0] === "trash") return { screen: "trash" };
+        if (parts[0] === "changes") return { screen: "changes" };
         return { screen: "main" };
     }
 
     function showScreen(name) {
         document.getElementById("screen-main").classList.add("hidden");
         document.getElementById("screen-trash").classList.add("hidden");
+        document.getElementById("screen-changes").classList.add("hidden");
         document.getElementById("screen-versions").classList.add("hidden");
         const el = document.getElementById("screen-" + name);
         if (el) el.classList.remove("hidden");
@@ -359,6 +361,34 @@
         });
     }
 
+    function renderChanges() {
+        showScreen("changes");
+        apiGet("/changes").then(function (changes) {
+            const tbody = document.getElementById("changes-tbody");
+            if (!changes.length) {
+                tbody.innerHTML = '<tr><td colspan="5" class="p-3 text-gray-600">No changes recorded</td></tr>';
+                return;
+            }
+            tbody.innerHTML = changes.map(function (c) {
+                const entityLink = '<a href="#/versions/' + escapeAttr(c.entity_type) + '/' + c.entity_id + '" class="text-blue-600 hover:underline">' + escapeHtml(c.entity_type) + ' #' + c.entity_id + '</a>';
+                const whatChanged = c.what_changed && c.what_changed.length
+                    ? c.what_changed.map(function (line) { return escapeHtml(line); }).join("<br>")
+                    : "—";
+                return (
+                    "<tr class=\"border-b hover:bg-gray-50\">" +
+                    "<td class=\"p-3 text-sm\">" + escapeHtml(c.date) + "</td>" +
+                    "<td class=\"p-3\">" + escapeHtml(c.who) + "</td>" +
+                    "<td class=\"p-3\">" + escapeHtml(c.operation) + "</td>" +
+                    "<td class=\"p-3\">" + entityLink + "</td>" +
+                    "<td class=\"p-3 text-sm\">" + whatChanged + "</td>" +
+                    "</tr>"
+                );
+            }).join("");
+        }).catch(function (err) {
+            toast((err.body && err.body.error) || "Failed to load changes", "error");
+        });
+    }
+
     function renderVersions(entityType, entityId) {
         showScreen("versions");
         document.getElementById("versions-title").textContent = "Versions for " + entityType + " #" + entityId;
@@ -409,6 +439,7 @@
         const r = getRoute();
         if (r.screen === "main") renderMain();
         else if (r.screen === "trash") renderTrash();
+        else if (r.screen === "changes") renderChanges();
         else if (r.screen === "versions" && r.entityType && r.entityId) renderVersions(r.entityType, r.entityId);
         else renderMain();
     }

@@ -11,6 +11,7 @@
         <h1 class="text-2xl font-bold">Versioning Demo</h1>
         <nav class="flex gap-2">
             <a href="#/" class="nav-link bg-gray-800 text-white px-4 py-2 rounded" data-route="/">Main</a>
+            <a href="#/changes" class="nav-link px-4 py-2 rounded border" data-route="/changes">Changes</a>
             <a href="#/trash" class="nav-link px-4 py-2 rounded border" data-route="/trash">Trash</a>
         </nav>
     </div>
@@ -77,6 +78,25 @@
         <a href="#/" class="text-blue-600 mb-4 inline-block">&larr; Back</a>
         <h2 class="text-xl font-semibold mb-3">Deleted Objects</h2>
         <div id="trash-list" class="space-y-4"></div>
+    </div>
+
+    <div id="screen-changes" class="hidden">
+        <a href="#/" class="text-blue-600 mb-4 inline-block">&larr; Back</a>
+        <h2 class="text-xl font-semibold mb-3">Change history</h2>
+        <div class="bg-white rounded shadow overflow-x-auto">
+            <table class="w-full border-collapse">
+                <thead>
+                    <tr class="border-b bg-gray-50">
+                        <th class="text-left p-3">Date</th>
+                        <th class="text-left p-3">Who</th>
+                        <th class="text-left p-3">Operation</th>
+                        <th class="text-left p-3">Entity type</th>
+                        <th class="text-left p-3">What changed</th>
+                    </tr>
+                </thead>
+                <tbody id="changes-tbody"></tbody>
+            </table>
+        </div>
     </div>
 
     <div id="screen-versions" class="hidden">
