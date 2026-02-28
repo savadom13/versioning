@@ -18,5 +18,5 @@ class Config:
     JWT_ALGORITHM = "HS256"
 
     # Demo auth (for development only; replace with real auth in production)
-    DEMO_USERNAME = "test_user"
-    DEMO_PASSWORD = "test_pass"
+    DEMO_USERNAME = "test"
+    DEMO_PASSWORD = "test"

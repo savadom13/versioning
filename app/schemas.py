@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 # --- Base ---
@@ -51,21 +51,37 @@ class SessionResponse(BaseResponse):
 
 
 class SignalCreateRequest(BaseRequest):
-    frequency: float = 0
+    frequency_from: float = 0
+    frequency_to: float = 0
     modulation: str = ""
     power: float = 0
 
+    @model_validator(mode="after")
+    def frequency_range_order(self):
+        if self.frequency_to < self.frequency_from:
+            raise ValueError("frequency_to must be >= frequency_from")
+        return self
+
 
 class SignalUpdateRequest(BaseRequest):
-    frequency: float | None = None
+    frequency_from: float | None = None
+    frequency_to: float | None = None
     modulation: str | None = None
     power: float | None = None
     lock_version: int = 0
 
+    @model_validator(mode="after")
+    def frequency_range_order(self):
+        if self.frequency_from is not None and self.frequency_to is not None:
+            if self.frequency_to < self.frequency_from:
+                raise ValueError("frequency_to must be >= frequency_from")
+        return self
+
 
 class SignalResponse(BaseResponse):
     id: int
-    frequency: float
+    frequency_from: float
+    frequency_to: float
     modulation: str
     power: float
     created_by: str
@@ -134,7 +150,8 @@ class VersionResponse(BaseResponse):
 def signal_to_response(signal, *, updated: bool | None = None) -> dict:
     return {
         "id": signal.id,
-        "frequency": signal.frequency,
+        "frequency_from": signal.frequency_from,
+        "frequency_to": signal.frequency_to,
         "modulation": signal.modulation,
         "power": signal.power,
         "created_by": signal.created_by,

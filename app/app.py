@@ -171,7 +171,8 @@ def api_signals_create():
     body = request.get_json(silent=True) or {}
     req = SignalCreateRequest.model_validate(body)
     signal = Signal(
-        frequency=req.frequency,
+        frequency_from=req.frequency_from,
+        frequency_to=req.frequency_to,
         modulation=req.modulation,
         power=req.power,
     )
@@ -192,8 +193,10 @@ def api_signals_update(signal_id):
     body = request.get_json(silent=True) or {}
     req = SignalUpdateRequest.model_validate(body)
     previous_lock = signal.lock_version
-    if req.frequency is not None:
-        signal.frequency = req.frequency
+    if req.frequency_from is not None:
+        signal.frequency_from = req.frequency_from
+    if req.frequency_to is not None:
+        signal.frequency_to = req.frequency_to
     if req.modulation is not None:
         signal.modulation = req.modulation
     if req.power is not None:

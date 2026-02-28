@@ -151,11 +151,12 @@
             return (
                 '<div class="bg-white p-4 rounded shadow" data-signal-id="' + s.id + '">' +
                 '<div class="flex justify-between mb-2">' +
-                '<div><p class="font-semibold">f=' + escapeHtml(s.frequency) + ', mod=' + escapeHtml(s.modulation) + ', p=' + escapeHtml(s.power) + '</p>' +
+                '<div><p class="font-semibold">f=' + escapeHtml(formatFrequency(s)) + ', mod=' + escapeHtml(s.modulation) + ', p=' + escapeHtml(s.power) + '</p>' +
                 '<p class="text-sm text-gray-500">Created by ' + escapeHtml(s.created_by) + ' | Updated by ' + escapeHtml(s.updated_by) + '</p></div>' +
                 '<a href="#/versions/signals/' + s.id + '" class="text-blue-600">Versions</a></div>' +
                 '<div class="flex gap-2 items-center flex-wrap">' +
-                '<input type="number" step="any" class="signal-freq border p-1 w-24" value="' + s.frequency + '">' +
+                '<input type="number" step="any" class="signal-freq-from border p-1 w-24" value="' + s.frequency_from + '" placeholder="From">' +
+                '<input type="number" step="any" class="signal-freq-to border p-1 w-24" value="' + s.frequency_to + '" placeholder="To">' +
                 '<input type="text" class="signal-mod border p-1 w-24" value="' + escapeAttr(s.modulation) + '">' +
                 '<input type="number" step="any" class="signal-pow border p-1 w-24" value="' + s.power + '">' +
                 '<button type="button" class="btn-signal-update bg-green-600 text-white px-3 py-1 rounded">Update</button>' +
@@ -169,7 +170,12 @@
             btn.addEventListener("click", function () {
                 const card = btn.closest("[data-signal-id]");
                 const id = card.getAttribute("data-signal-id");
-                const freq = card.querySelector(".signal-freq").value;
+                const freqFromVal = card.querySelector(".signal-freq-from").value;
+                const freqToVal = card.querySelector(".signal-freq-to").value;
+                var freqFrom = parseFloat(freqFromVal);
+                var freqTo = parseFloat(freqToVal);
+                if (isNaN(freqTo) || freqToVal.trim() === "") freqTo = freqFrom;
+                if (isNaN(freqFrom)) freqFrom = 0;
                 const mod = card.querySelector(".signal-mod").value;
                 const pow = card.querySelector(".signal-pow").value;
                 const lock = parseInt(card.querySelector(".signal-lock").value, 10);
@@ -177,7 +183,7 @@
                     toast("Please refresh the page and try again.", "error");
                     return;
                 }
-                apiPatch("/signals/" + id, { frequency: parseFloat(freq), modulation: mod, power: parseFloat(pow), lock_version: lock })
+                apiPatch("/signals/" + id, { frequency_from: freqFrom, frequency_to: freqTo, modulation: mod, power: parseFloat(pow), lock_version: lock })
                     .then(function (res) {
                         card.querySelector(".signal-lock").value = res.lock_version;
                         if (res.updated === false) toast("No changes.", "info");
@@ -212,7 +218,7 @@
     function renderNewAssetSignalsPicker(signals) {
         const container = document.getElementById("new-asset-signals-list");
         container.innerHTML = signals.map(function (s) {
-            return '<label class="signals-option block p-1 rounded hover:bg-gray-100"><input type="checkbox" name="signal_ids" value="' + s.id + '" class="mr-2">#' + s.id + ' | f=' + s.frequency + ' | ' + escapeHtml(s.modulation) + ' | p=' + s.power + '</label>';
+            return '<label class="signals-option block p-1 rounded hover:bg-gray-100"><input type="checkbox" name="signal_ids" value="' + s.id + '" class="mr-2">#' + s.id + ' | f=' + escapeHtml(formatFrequency(s)) + ' | ' + escapeHtml(s.modulation) + ' | p=' + s.power + '</label>';
         }).join("");
         setupSearchableSignals(container.closest(".searchable-signals"));
     }
@@ -255,7 +261,7 @@
                 cb.value = String(s.id);
                 if (initialIds.indexOf(s.id) >= 0) cb.checked = true;
                 label.appendChild(cb);
-                label.appendChild(document.createTextNode(" #" + s.id + " | f=" + s.frequency + " | " + s.modulation + " | p=" + s.power));
+                label.appendChild(document.createTextNode(" #" + s.id + " | f=" + formatFrequency(s) + " | " + s.modulation + " | p=" + s.power));
                 signalsListEl.appendChild(label);
             });
             setupSearchableSignals(card.querySelector(".searchable-signals"));
@@ -389,6 +395,16 @@
             .replace(/>/g, "&gt;");
     }
 
+    function formatFrequency(s) {
+        var from = s.frequency_from;
+        var to = s.frequency_to;
+        if (from == null && to == null) return "";
+        if (from == null) return String(to);
+        if (to == null) return String(from);
+        if (Number(from) === Number(to)) return String(from);
+        return from + "\u2013" + to;
+    }
+
     function route() {
         const r = getRoute();
         if (r.screen === "main") renderMain();
@@ -408,18 +424,6 @@
     }
 
     window.addEventListener("load", function () {
-        if (!getToken()) {
-            showAuthModal();
-            return;
-        }
-        apiGet("/session").then(function (data) {
-            updateUserBar(data.active_user || "");
-            hideAuthModal();
-            route();
-        }).catch(function () {
-            showAuthModal();
-        });
-
         document.getElementById("auth-submit").addEventListener("click", function () {
             var username = document.getElementById("auth-username").value.trim();
             var password = document.getElementById("auth-password").value;
@@ -446,12 +450,16 @@
         });
 
         document.getElementById("btn-create-signal").addEventListener("click", function () {
-            var freq = document.getElementById("new-signal-frequency").value;
+            var freqFromVal = document.getElementById("new-signal-frequency-from").value;
+            var freqToVal = document.getElementById("new-signal-frequency-to").value;
+            var freqFrom = parseFloat(freqFromVal) || 0;
+            var freqTo = (freqToVal.trim() !== "" && !isNaN(parseFloat(freqToVal))) ? parseFloat(freqToVal) : freqFrom;
             var mod = document.getElementById("new-signal-modulation").value;
             var pow = document.getElementById("new-signal-power").value;
-            apiPost("/signals", { frequency: parseFloat(freq) || 0, modulation: mod || "", power: parseFloat(pow) || 0 })
+            apiPost("/signals", { frequency_from: freqFrom, frequency_to: freqTo, modulation: mod || "", power: parseFloat(pow) || 0 })
                 .then(function () {
-                    document.getElementById("new-signal-frequency").value = "";
+                    document.getElementById("new-signal-frequency-from").value = "";
+                    document.getElementById("new-signal-frequency-to").value = "";
                     document.getElementById("new-signal-modulation").value = "";
                     document.getElementById("new-signal-power").value = "";
                     toast("Signal created.", "success");
@@ -477,6 +485,18 @@
                 .catch(function (err) {
                     toast((err.body && err.body.error) || "Create failed", "error");
                 });
+        });
+
+        if (!getToken()) {
+            showAuthModal();
+            return;
+        }
+        apiGet("/session").then(function (data) {
+            updateUserBar(data.active_user || "");
+            hideAuthModal();
+            route();
+        }).catch(function () {
+            showAuthModal();
         });
     });
 })();

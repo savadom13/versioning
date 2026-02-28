@@ -46,7 +46,8 @@ class SoftDeleteMixin:
 class Signal(db.Model, VersionedMixin, SoftDeleteMixin):
     __tablename__ = "signals"
 
-    frequency = db.Column(db.Float, nullable=False)
+    frequency_from = db.Column(db.Float, nullable=False)
+    frequency_to = db.Column(db.Float, nullable=False)
     modulation = db.Column(db.String(50), nullable=False)
     power = db.Column(db.Float, nullable=False)
 
@@ -59,7 +60,9 @@ class Signal(db.Model, VersionedMixin, SoftDeleteMixin):
 
     @property
     def trash_name(self):
-        return f"f={self.frequency}, {self.modulation}"
+        if self.frequency_from == self.frequency_to:
+            return f"f={self.frequency_from}, {self.modulation}"
+        return f"f={self.frequency_from}-{self.frequency_to}, {self.modulation}"
 
 
 class Asset(db.Model, VersionedMixin, SoftDeleteMixin):
