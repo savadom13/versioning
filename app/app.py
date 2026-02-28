@@ -1,4 +1,3 @@
-
 import os
 from pathlib import Path
 import sys
@@ -6,6 +5,14 @@ from functools import wraps
 
 from flask import Blueprint, Flask, flash, jsonify, request, redirect, session, url_for, send_from_directory
 from flask_migrate import Migrate
+from flask_jwt_extended import (
+    JWTManager,
+    create_access_token,
+    get_jwt_identity,
+    verify_jwt_in_request,
+)
+from flask_pydantic_spec import FlaskPydanticSpec
+from pydantic import ValidationError
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -13,12 +20,27 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from config import Config
 from models import db, Asset, EntityVersion, Signal, OptimisticLockError
+from schemas import (
+    ErrorResponse,
+    LoginRequest,
+    LoginResponse,
+    SessionResponse,
+    SignalCreateRequest,
+    SignalUpdateRequest,
+    AssetCreateRequest,
+    AssetUpdateRequest,
+    signal_to_response,
+    asset_to_response,
+    version_to_response,
+)
 
 app = Flask(__name__, static_folder=str(Path(__file__).resolve().parent / "static"), static_url_path="/static")
 app.config.from_object(Config)
 
 db.init_app(app)
 migrate = Migrate(app, db)
+jwt = JWTManager(app)
+api_spec = FlaskPydanticSpec("flask", title="Versioning API", version="1.0", path="apidoc")
 
 ENTITY_MODELS = {
     "signals": Signal,
@@ -27,7 +49,11 @@ ENTITY_MODELS = {
 
 
 def _active_user():
-    return session.get("active_user", "system")
+    try:
+        identity = get_jwt_identity()
+        return identity or "system"
+    except RuntimeError:
+        return "system"
 
 
 def _set_actor():
@@ -35,7 +61,12 @@ def _set_actor():
 
 
 def _expected_lock_version_from_request():
-    raw = request.form.get("lock_version") or (request.get_json(silent=True) or {}).get("lock_version")
+    raw = request.form.get("lock_version")
+    if raw is None and request.is_json:
+        try:
+            raw = (request.get_json(silent=True) or {}).get("lock_version")
+        except Exception:
+            pass
     try:
         return int(raw) if raw is not None else 0
     except (ValueError, TypeError):
@@ -51,8 +82,8 @@ def require_optimistic_lock(Model):
         def wrapped(*args, **kwargs):
             entity_id = kwargs.get(id_param)
             if entity_id is None:
-                if request.path.startswith("/api/"):
-                    return jsonify({"error": "Missing entity id"}), 400
+            if request.path.startswith("/api/"):
+                return jsonify(ErrorResponse(error="Missing entity id").model_dump()), 400
                 return redirect(url_for("index"))
             try:
                 eid = int(entity_id)
@@ -68,83 +99,81 @@ def require_optimistic_lock(Model):
 @app.errorhandler(OptimisticLockError)
 def handle_optimistic_lock_error(exc):
     if request.path.startswith("/api/"):
-        return jsonify({"error": str(exc)}), 409
+        return jsonify(ErrorResponse(error=str(exc)).model_dump()), 409
     flash(str(exc), "error")
     return redirect(url_for("index"))
 
 
-def signal_to_dict(signal):
-    return {
-        "id": signal.id,
-        "frequency": signal.frequency,
-        "modulation": signal.modulation,
-        "power": signal.power,
-        "created_by": signal.created_by,
-        "updated_by": signal.updated_by,
-        "lock_version": signal.lock_version,
-    }
-
-
-def asset_to_dict(asset):
-    return {
-        "id": asset.id,
-        "name": asset.name,
-        "description": asset.description,
-        "signal_ids": sorted(s.id for s in asset.signals),
-        "created_by": asset.created_by,
-        "updated_by": asset.updated_by,
-        "lock_version": asset.lock_version,
-    }
-
-
-def version_to_dict(v):
-    return {
-        "id": v.id,
-        "entity_type": v.entity_type,
-        "entity_id": v.entity_id,
-        "version": v.version,
-        "operation": v.operation,
-        "snapshot": v.snapshot,
-        "diff": v.diff,
-        "hash": v.hash,
-        "changed_at": v.changed_at.isoformat() if v.changed_at else None,
-        "changed_by": v.changed_by,
-    }
+@app.errorhandler(ValidationError)
+def handle_validation_error(exc):
+    if request.path.startswith("/api/"):
+        msg = exc.errors()[0].get("msg", "Validation error") if exc.errors() else "Validation error"
+        return jsonify(ErrorResponse(error=msg).model_dump()), 422
+    return jsonify(ErrorResponse(error="Invalid request").model_dump()), 422
 
 
 api_bp = Blueprint("api", __name__, url_prefix="/api")
 
 
+def _api_path_no_jwt():
+    """Paths that do not require JWT (login, openapi, apidoc)."""
+    path = request.path or ""
+    return (
+        path.endswith("/auth/login")
+        or "/openapi" in path
+        or "/apidoc" in path
+    )
+
+
+@api_bp.before_request
+def require_jwt_for_api():
+    if _api_path_no_jwt():
+        return None
+    try:
+        verify_jwt_in_request(optional=False)
+    except Exception:
+        return jsonify(ErrorResponse(error="Authorization required").model_dump()), 401
+    return None
+
+
+@api_bp.route("/auth/login", methods=["POST"])
+def api_auth_login():
+    """Login with username/password. Demo: test_user / test_pass."""
+    try:
+        body = request.get_json(force=True, silent=True) or {}
+        req = LoginRequest.model_validate(body)
+    except ValidationError as e:
+        return jsonify(ErrorResponse(error=e.errors()[0].get("msg", "Validation error")).model_dump()), 422
+    if req.username != app.config["DEMO_USERNAME"] or req.password != app.config["DEMO_PASSWORD"]:
+        return jsonify(ErrorResponse(error="Invalid username or password").model_dump()), 401
+    token = create_access_token(identity=req.username)
+    return jsonify(LoginResponse(access_token=token, user=req.username).model_dump()), 200
+
+
 @api_bp.route("/session", methods=["GET"])
 def api_session_get():
-    return jsonify({"active_user": _active_user()})
-
-
-@api_bp.route("/session", methods=["POST"])
-def api_session_post():
-    data = request.get_json(silent=True) or {}
-    session["active_user"] = (data.get("active_user") or "system").strip() or "system"
-    return jsonify({"active_user": session["active_user"]})
+    return jsonify(SessionResponse(active_user=_active_user()).model_dump())
 
 
 @api_bp.route("/signals", methods=["GET"])
 def api_signals_list():
     signals = Signal.query.filter_by(is_deleted=False).order_by(Signal.id.desc()).all()
-    return jsonify([signal_to_dict(s) for s in signals])
+    return jsonify([signal_to_response(s) for s in signals])
 
 
 @api_bp.route("/signals", methods=["POST"])
 def api_signals_create():
     _set_actor()
-    data = request.get_json(silent=True) or {}
+    body = request.get_json(silent=True) or {}
+    req = SignalCreateRequest.model_validate(body)
     signal = Signal(
-        frequency=float(data.get("frequency", 0)),
-        modulation=str(data.get("modulation", "")),
-        power=float(data.get("power", 0)),
+        frequency=req.frequency,
+        modulation=req.modulation,
+        power=req.power,
     )
     db.session.add(signal)
     db.session.commit()
-    return jsonify(signal_to_dict(signal)), 201
+    return jsonify(signal_to_response(signal)), 201
 
 
 def _record_entity_lock_at_load(entity):
@@ -159,20 +188,20 @@ def api_signals_update(signal_id):
     _set_actor()
     signal = Signal.query.filter_by(id=signal_id, is_deleted=False).first()
     if not signal:
-        return jsonify({"error": "Signal not found"}), 404
+        return jsonify(ErrorResponse(error="Signal not found").model_dump()), 404
     _record_entity_lock_at_load(signal)
-    data = request.get_json(silent=True) or {}
+    body = request.get_json(silent=True) or {}
+    req = SignalUpdateRequest.model_validate(body)
     previous_lock = signal.lock_version
-    signal.frequency = float(data.get("frequency", signal.frequency))
-    signal.modulation = str(data.get("modulation", signal.modulation))
-    signal.power = float(data.get("power", signal.power))
+    if req.frequency is not None:
+        signal.frequency = req.frequency
+    if req.modulation is not None:
+        signal.modulation = req.modulation
+    if req.power is not None:
+        signal.power = req.power
     db.session.commit()
-    out = signal_to_dict(signal)
-    if signal.lock_version == previous_lock:
-        out["updated"] = False
-    else:
-        out["updated"] = True
-    return jsonify(out)
+    updated = signal.lock_version != previous_lock
+    return jsonify(signal_to_response(signal, updated=updated))
 
 
 @api_bp.route("/signals/<int:signal_id>", methods=["DELETE"])
@@ -181,7 +210,7 @@ def api_signals_delete(signal_id):
     _set_actor()
     signal = Signal.query.filter_by(id=signal_id, is_deleted=False).first()
     if not signal:
-        return jsonify({"error": "Signal not found"}), 404
+        return jsonify(ErrorResponse(error="Signal not found").model_dump()), 404
     _record_entity_lock_at_load(signal)
     signal.soft_delete(_active_user())
     db.session.commit()
@@ -191,23 +220,23 @@ def api_signals_delete(signal_id):
 @api_bp.route("/assets", methods=["GET"])
 def api_assets_list():
     assets = Asset.query.filter_by(is_deleted=False).order_by(Asset.id.desc()).all()
-    return jsonify([asset_to_dict(a) for a in assets])
+    return jsonify([asset_to_response(a) for a in assets])
 
 
 @api_bp.route("/assets", methods=["POST"])
 def api_assets_create():
     _set_actor()
-    data = request.get_json(silent=True) or {}
-    signal_ids = data.get("signal_ids") or []
-    signals = Signal.query.filter(Signal.id.in_(signal_ids), Signal.is_deleted.is_(False)).all() if signal_ids else []
-    asset = Asset(
-        name=str(data.get("name", "")),
-        description=str(data.get("description", "")),
-        signals=signals,
+    body = request.get_json(silent=True) or {}
+    req = AssetCreateRequest.model_validate(body)
+    signals = (
+        Signal.query.filter(Signal.id.in_(req.signal_ids), Signal.is_deleted.is_(False)).all()
+        if req.signal_ids
+        else []
     )
+    asset = Asset(name=req.name, description=req.description, signals=signals)
     db.session.add(asset)
     db.session.commit()
-    return jsonify(asset_to_dict(asset)), 201
+    return jsonify(asset_to_response(asset)), 201
 
 
 @api_bp.route("/assets/<int:asset_id>", methods=["PATCH"])
@@ -216,22 +245,25 @@ def api_assets_update(asset_id):
     _set_actor()
     asset = Asset.query.filter_by(id=asset_id, is_deleted=False).first()
     if not asset:
-        return jsonify({"error": "Asset not found"}), 404
+        return jsonify(ErrorResponse(error="Asset not found").model_dump()), 404
     _record_entity_lock_at_load(asset)
-    data = request.get_json(silent=True) or {}
+    body = request.get_json(silent=True) or {}
+    req = AssetUpdateRequest.model_validate(body)
     previous_lock = asset.lock_version
-    signal_ids = data.get("signal_ids") or []
-    selected_signals = Signal.query.filter(Signal.id.in_(signal_ids), Signal.is_deleted.is_(False)).all() if signal_ids else []
-    asset.name = str(data.get("name", asset.name))
-    asset.description = str(data.get("description", asset.description))
-    asset.signals = selected_signals
+    if req.name is not None:
+        asset.name = req.name
+    if req.description is not None:
+        asset.description = req.description
+    if req.signal_ids is not None:
+        selected = (
+            Signal.query.filter(Signal.id.in_(req.signal_ids), Signal.is_deleted.is_(False)).all()
+            if req.signal_ids
+            else []
+        )
+        asset.signals = selected
     db.session.commit()
-    out = asset_to_dict(asset)
-    if asset.lock_version == previous_lock:
-        out["updated"] = False
-    else:
-        out["updated"] = True
-    return jsonify(out)
+    updated = asset.lock_version != previous_lock
+    return jsonify(asset_to_response(asset, updated=updated))
 
 
 @api_bp.route("/assets/<int:asset_id>", methods=["DELETE"])
@@ -240,7 +272,7 @@ def api_assets_delete(asset_id):
     _set_actor()
     asset = Asset.query.filter_by(id=asset_id, is_deleted=False).first()
     if not asset:
-        return jsonify({"error": "Asset not found"}), 404
+        return jsonify(ErrorResponse(error="Asset not found").model_dump()), 404
     _record_entity_lock_at_load(asset)
     asset.soft_delete(_active_user())
     db.session.commit()
@@ -274,17 +306,18 @@ def api_trash_list():
 def api_versions_list(entity_type, entity_id):
     model = ENTITY_MODELS.get(entity_type)
     if model is None:
-        return jsonify({"error": "Unknown entity type"}), 404
+        return jsonify(ErrorResponse(error="Unknown entity type").model_dump()), 404
     versions = (
         EntityVersion.query
         .filter_by(entity_type=model.__tablename__, entity_id=entity_id)
         .order_by(EntityVersion.version.desc())
         .all()
     )
-    return jsonify([version_to_dict(v) for v in versions])
+    return jsonify([version_to_response(v) for v in versions])
 
 
 app.register_blueprint(api_bp)
+api_spec.register(app)
 
 
 @app.route("/")
@@ -295,7 +328,7 @@ def index():
 @app.route("/<path:path>")
 def spa_fallback(path):
     if path.startswith("api/"):
-        return jsonify({"error": "Not found"}), 404
+        return jsonify(ErrorResponse(error="Not found").model_dump()), 404
     return send_from_directory(app.static_folder, "index.html")
 
 

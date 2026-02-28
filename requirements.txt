@@ -1,6 +1,8 @@
-
 Flask==3.0.2
 Flask-SQLAlchemy==3.1.1
 Flask-Migrate==4.0.7
+Flask-JWT-Extended==4.6.0
+flask-pydantic-spec==0.8.7
 alembic==1.13.2
 PyMySQL==1.1.1
+pydantic==2.9.2

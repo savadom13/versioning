@@ -2,6 +2,55 @@
     "use strict";
 
     const API = "/api";
+    const TOKEN_KEY = "versioning_access_token";
+
+    function getToken() {
+        return localStorage.getItem(TOKEN_KEY);
+    }
+
+    function setToken(token) {
+        if (token) localStorage.setItem(TOKEN_KEY, token);
+        else localStorage.removeItem(TOKEN_KEY);
+    }
+
+    function authHeaders() {
+        const t = getToken();
+        const h = { "Content-Type": "application/json" };
+        if (t) h["Authorization"] = "Bearer " + t;
+        return h;
+    }
+
+    function showAuthModal(message) {
+        const modal = document.getElementById("auth-modal");
+        const errEl = document.getElementById("auth-error");
+        if (message) {
+            errEl.textContent = message;
+            errEl.classList.remove("hidden");
+        } else {
+            errEl.textContent = "";
+            errEl.classList.add("hidden");
+        }
+        modal.classList.remove("hidden");
+        modal.classList.add("flex");
+    }
+
+    function hideAuthModal() {
+        const modal = document.getElementById("auth-modal");
+        modal.classList.add("hidden");
+        modal.classList.remove("flex");
+        document.getElementById("auth-error").classList.add("hidden");
+    }
+
+    function updateUserBar(username) {
+        const bar = document.getElementById("user-bar");
+        const el = document.getElementById("current-username");
+        if (username) {
+            el.textContent = username;
+            bar.classList.remove("hidden");
+        } else {
+            bar.classList.add("hidden");
+        }
+    }
 
     function toast(message, type) {
         const el = document.getElementById("toast");
@@ -19,51 +68,49 @@
         }, 4000);
     }
 
+    function handleApiResponse(r) {
+        const j = r.json().catch(function () { return null; });
+        if (r.status === 401) {
+            setToken(null);
+            updateUserBar(null);
+            showAuthModal("Session expired. Please sign in again.");
+            return j.then(function () { throw { status: 401, body: { error: "Unauthorized" } }; });
+        }
+        if (!r.ok) return j.then(function (body) { throw { status: r.status, body: body }; });
+        return j;
+    }
+
     function apiGet(path) {
-        return fetch(API + path, { credentials: "same-origin" }).then(function (r) {
-            const j = r.json().catch(function () { return null; });
-            if (!r.ok) return j.then(function (body) { throw { status: r.status, body: body }; });
-            return j;
-        });
+        return fetch(API + path, { credentials: "same-origin", headers: authHeaders() }).then(handleApiResponse);
     }
 
     function apiPost(path, body) {
         return fetch(API + path, {
             method: "POST",
             credentials: "same-origin",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(body),
-        }).then(function (r) {
-            const j = r.json().catch(function () { return null; });
-            if (!r.ok) return j.then(function (body) { throw { status: r.status, body: body }; });
-            return j;
-        });
+            headers: authHeaders(),
+            body: JSON.stringify(body || {}),
+        }).then(handleApiResponse);
     }
 
     function apiPatch(path, body) {
         return fetch(API + path, {
             method: "PATCH",
             credentials: "same-origin",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(body),
-        }).then(function (r) {
-            const j = r.json().catch(function () { return null; });
-            if (!r.ok) return j.then(function (body) { throw { status: r.status, body: body }; });
-            return j;
-        });
+            headers: authHeaders(),
+            body: JSON.stringify(body || {}),
+        }).then(handleApiResponse);
     }
 
     function apiDelete(path, body) {
         return fetch(API + path, {
             method: "DELETE",
             credentials: "same-origin",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(body || {}),
+            headers: authHeaders(),
+            body: body ? JSON.stringify(body) : undefined,
         }).then(function (r) {
             if (r.status === 204) return {};
-            const j = r.json().catch(function () { return null; });
-            if (!r.ok) return j.then(function (body) { throw { status: r.status, body: body }; });
-            return j;
+            return handleApiResponse(r);
         });
     }
 
@@ -351,18 +398,53 @@
     }
 
     window.addEventListener("hashchange", route);
-    window.addEventListener("load", function () {
+
+    function onAuthReady() {
+        hideAuthModal();
         apiGet("/session").then(function (data) {
-            document.getElementById("active-user-input").value = data.active_user || "";
-        }).catch(function () {});
-        document.getElementById("active-user-btn").addEventListener("click", function () {
-            var user = document.getElementById("active-user-input").value.trim() || "system";
-            apiPost("/session", { active_user: user }).then(function () {
-                toast("Active user set.", "success");
-            }).catch(function (err) {
-                toast((err.body && err.body.error) || "Failed", "error");
-            });
+            updateUserBar(data.active_user || "");
+            route();
+        }).catch(function () { updateUserBar(null); });
+    }
+
+    window.addEventListener("load", function () {
+        if (!getToken()) {
+            showAuthModal();
+            return;
+        }
+        apiGet("/session").then(function (data) {
+            updateUserBar(data.active_user || "");
+            hideAuthModal();
+            route();
+        }).catch(function () {
+            showAuthModal();
         });
+
+        document.getElementById("auth-submit").addEventListener("click", function () {
+            var username = document.getElementById("auth-username").value.trim();
+            var password = document.getElementById("auth-password").value;
+            if (!username) {
+                showAuthModal("Enter username");
+                return;
+            }
+            apiPost("/auth/login", { username: username, password: password })
+                .then(function (data) {
+                    setToken(data.access_token);
+                    onAuthReady();
+                    toast("Signed in.", "success");
+                })
+                .catch(function (err) {
+                    if (err.status === 401) showAuthModal(err.body && err.body.error ? err.body.error : "Invalid username or password");
+                    else showAuthModal((err.body && err.body.error) || "Login failed");
+                });
+        });
+
+        document.getElementById("logout-btn").addEventListener("click", function () {
+            setToken(null);
+            updateUserBar(null);
+            showAuthModal();
+        });
+
         document.getElementById("btn-create-signal").addEventListener("click", function () {
             var freq = document.getElementById("new-signal-frequency").value;
             var mod = document.getElementById("new-signal-modulation").value;
@@ -396,6 +478,5 @@
                     toast((err.body && err.body.error) || "Create failed", "error");
                 });
         });
-        route();
     });
 })();
