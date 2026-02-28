@@ -16,7 +16,6 @@
 python -m venv venv
 source venv/bin/activate  # Windows: venv\Scripts\activate
 pip install -r requirements.txt
-flask --app app/app.py db upgrade
 python app/app.py
 ```
 
@@ -46,3 +45,4 @@ flask --app app/app.py db migrate -m "describe change"
 # Apply migrations
 flask --app app/app.py db upgrade
 ```
+flask --app app/app.py db upgrade
